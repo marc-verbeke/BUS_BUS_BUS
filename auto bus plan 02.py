@@ -1,18 +1,17 @@
 import pandas as pd
+from datetime import datetime
 from mip import Model, xsum, minimize, BINARY
-import os
 
-dienst_datum = []
-dienst_stelplaats = []
-dienst_nummer = []
-dienst_type = []
-dienst_subtype = []
-dienst_start = []
-dienst_eind = []
-dienst_km = []
-dienst_lez = []
-dienst_elektriciteit = []
-dienst_hoogte_nok = []
+# Load the data
+dienst = pd.read_excel("data/DIENSTEN.xlsx")
+voertuig = pd.read_excel("data/voertuigen.xlsx")
+
+# Combine dates and hours
+dienst['startdatuur'] = dienst.apply(lambda row: datetime.combine(row['startdatum'], row['start']), axis=1)
+dienst['einddatuur'] = dienst.apply(lambda row: datetime.combine(row['einddatum'], row['eind']), axis=1)
+
+aantal_voertuigen = len(voertuig)
+aantal_diensten = len(dienst)
 
 voertuig_datum = []
 voertuig_stelplaats = []
@@ -44,27 +43,6 @@ toegewezen_voertuig_beschikbaar = []
 
 toegewezen_voertuig = []
 
-excel_file_path = "data/TEST_DIENSTEN.xlsx"
-dienst = pd.read_excel(excel_file_path)
-excel_file_path = "data/TEST_VOERTUIGEN.xlsx"
-voertuig = pd.read_excel(excel_file_path)
-
-aantal_voertuigen = len(voertuig)
-aantal_diensten = len(dienst)
-
-for x in range(len(dienst)):
-    dienst_datum.append(dienst.iloc[x,0])
-    dienst_stelplaats.append(dienst.iloc[x, 1])
-    dienst_nummer.append(dienst.iloc[x, 2])
-    dienst_type.append(dienst.iloc[x, 3])
-    dienst_subtype.append(dienst.iloc[x, 4])
-    dienst_start.append(dienst.iloc[x, 5])
-    dienst_eind.append(dienst.iloc[x, 6])
-    dienst_km.append(dienst.iloc[x, 7])
-    dienst_lez.append(dienst.iloc[x, 8])
-    dienst_elektriciteit.append(dienst.iloc[x, 9])
-    dienst_hoogte_nok.append(dienst.iloc[x, 10])
-
 for x in range(len(voertuig)):
     voertuig_datum.append(voertuig.iloc[x, 0])
     voertuig_stelplaats.append(voertuig.iloc[x, 1])
@@ -80,91 +58,90 @@ for x in range(len(voertuig)):
     voertuig_verbruik.append(voertuig.iloc[x, 11])
     voertuig_beschikbaar.append(voertuig.iloc[x, 12])
 
-# Maak een MIP-model
+# Create a MIP model
 m = Model("Voertuig-toewijzing")
 
-# Voeg beslissingsvariabelen toe (1 als voertuig i aan rit j wordt toegewezen, anders 0)
+# Add decision variables (1 if vehicle i is assigned to service j, otherwise 0)
 x = [[m.add_var(var_type=BINARY) for j in range(aantal_diensten)] for i in range(aantal_voertuigen)]
 
+# Define weights for the objectives
+weight_diesel = 0.5
+weight_age = 0.5
 
-# OBJECTIEF
-# VERBRUIK ZO MINIMAAL MOGELIJK MAZOUT
-m.objective = minimize(xsum(x[i][j] * dienst_km[j] * voertuig_verbruik[i] for i in range(aantal_voertuigen) for j in range(aantal_diensten)))
+# OBJECTIVE: Minimize diesel consumption and age
+m.objective = minimize(
+    weight_diesel * xsum(x[i][j] * dienst.loc[j, 'km'] * voertuig.loc[i, 'verbruik'] for i in range(aantal_voertuigen) for j in range(aantal_diensten)) +
+    weight_age * xsum(x[i][j] * voertuig.loc[i, 'leeftijd'] for i in range(aantal_voertuigen) for j in range(aantal_diensten))
+)
+# CONSTRAINTS
 
-
-# CONSTRAINT 01
-# DE DATUM VAN EEN DIENST MOET GELIJK ZIJN AAN DE DATUM VAN EEN VOERTUIG
+# Constraint 1: The date of a service must match the date of a vehicle
 for j in range(aantal_diensten):
-    m += xsum(x[i][j] for i in range(aantal_voertuigen) if voertuig.iloc[i, 0] == dienst.iloc[j, 0]) == 1
+    m += xsum(x[i][j] for i in range(aantal_voertuigen) if voertuig.loc[i, 'datum'] == dienst.loc[j, 'startdatum']) == 1
 
-# CONSTRAINT 01
-# IEDERE DIENST IS AAN EEN STELPLAATS GEKOPPELD
-# IEDER VOERTUIG IS AAN EEN STELPLAATS GEKOPPELD
-# DE STELPLAATSEN MOETEN GELIJK ZIJN
+# Constraint 2: Depots must match
 for j in range(aantal_diensten):
-    m += xsum(x[i][j] for i in range(aantal_voertuigen) if voertuig.iloc[i, 1] == dienst.iloc[j, 1]) == 1
+    m += xsum(x[i][j] for i in range(aantal_voertuigen) if voertuig.loc[i, 'stelplaats'] == dienst.loc[j, 'stelplaats']) == 1
 
-# elk voertuig wordt aan maximaal één dienst toegewezen
-# DIT MOET NOG VERDER AANGEPAST WORDEN VOERTUIGEN KUNNEN WEL MEER DAN 1 DIENST RIJDEN
+# Constraint 3: Each vehicle is assigned to at most one service at a time, with a 2-hour gap
 for i in range(aantal_voertuigen):
-    m += xsum(x[i][j] for j in range(aantal_diensten)) <= 1
+    for j1 in range(aantal_diensten):
+        for j2 in range(aantal_diensten):
+            if j1 != j2:
+                # Check if services j1 and j2 are on the same date and have at least 2 hours gap
+                if (dienst.loc[j1, 'startdatum'] == dienst.loc[j2, 'startdatum'] and
+                        (dienst.loc[j2, 'startdatuur'] - dienst.loc[j1, 'einddatuur']).total_seconds() >= 7200):
+                    m += x[i][j1] + x[i][j2] <= 1
 
-# CONSTRAINT 02
-# ELKE DIENST MOET DOOR 1 VOERTUIG GEREDEN WORDEN
+# Constraint 4: Each service must be assigned to exactly one vehicle
 for j in range(aantal_diensten):
     m += xsum(x[i][j] for i in range(aantal_voertuigen)) == 1
 
-# CONSTRAINT 03
-# EEN VOERTUIG MOET BESCHIKBAAR ZIJN OM AAN EEN DIENST TE KUNNEN TOEGEWEZEN WORDEN
-for j in range(aantal_diensten):
-    m += xsum(x[i][j] * voertuig_beschikbaar[i] for i in range(aantal_voertuigen)) == 1
+# Constraint 5: A vehicle must be available to be assigned to a service
+for i in range(aantal_voertuigen):
+    m += xsum(x[i][j] for j in range(aantal_diensten)) <= voertuig.loc[i, 'beschikbaar']
 
-# CONSTRAINT 04
-# HET TYPE VAN EEN DIENST MOET GELIJK ZIJN AAN HET TYPE VAN EEN VOERTUIG
-# type voertuig = type dienst => 1
+# Constraint 6: The type of a service must match the type of a vehicle
 for j in range(aantal_diensten):
-    m += xsum(x[i][j] for i in range(aantal_voertuigen) if voertuig.iloc[i, 3] == dienst.iloc[j, 3]) == 1
+    m += xsum(x[i][j] for i in range(aantal_voertuigen) if voertuig.loc[i, 'type'] == dienst.loc[j, 'type']) == 1
 
-# CONSTRAINT 05
-# HET SUBTYPE VAN EEN DIENST MOET GELIJK ZIJN AAN HET SUBTYPE VAN EEN VOERTUIG
+# Constraint 7: The subtype of a service must match the subtype of a vehicle
 for j in range(aantal_diensten):
-    m += xsum(x[i][j] for i in range(aantal_voertuigen) if voertuig.iloc[i, 4] == dienst.iloc[j, 4]) == 1
+    m += xsum(x[i][j] for i in range(aantal_voertuigen) if voertuig.loc[i, 'subtype'] == dienst.loc[j, 'subtype']) == 1
 
-# CONSTRAINT 06
-# HET RIJBEREIK VAN EEN VOERTUIG MOET GROTER ZIJN DAN HET AANTAL KM VAN EEN DIENST
+# Constraint 8: The range of a vehicle must be greater than the distance of a service
 for j in range(aantal_diensten):
-    m += xsum(x[i][j] for i in range(aantal_voertuigen) if voertuig.iloc[i, 10] < dienst.iloc[j, 7]) == 0
+    m += xsum(x[i][j] for i in range(aantal_voertuigen) if voertuig.loc[i, 'rijbereik'] >= dienst.loc[j, 'km']) == 1
 
-# CONSTRAINT 07
-# DIENSTEN IN LEZ ZONE MOET GEREDEN WORDEN DOOR VOERTUIGEN DIE LEZ OK ZIJN
+# Constraint 9: LEZ zones
 for j in range(aantal_diensten):
-    for i in range(aantal_voertuigen):
-        if dienst_lez[j] == 1:
-            m += x[i][j] <= voertuig_lez_ok[i]
-        else:
-            m += x[i][j] <= 1
+    if dienst.loc[j, 'lez'] == 1:
+        m += xsum(x[i][j] for i in range(aantal_voertuigen) if voertuig.loc[i, 'lez ok'] == 1) == 1
 
-# CONSTRAINT 08
-# DIENSTEN MET EEN HOOGTE PROBLEEM (te lage tunnels) MOET GEREDEN WORDEN DOOR VOERTUIG ZON DER HOOGTE PROBLEEM
+# Constraint 10: Height problem
 for j in range(aantal_diensten):
-    m += xsum(x[i][j] for i in range(aantal_voertuigen) if voertuig.iloc[i, 9] == dienst.iloc[j, 10] == 1) == 0
+    if dienst.loc[j, 'hoogte_nok'] == 1:
+        m += xsum(x[i][j] for i in range(aantal_voertuigen) if voertuig.loc[i, 'prob hoogte'] == 0) == 1
 
-# CONSTRAINT 09
-# EEN DIENST DIE DOOR EEN ELEKTRISCH VOERTUIG VRAAGT MOET GEREDEN WORDEN DOOR EEN ELEKTRISCHE BUS GEREDEN WORDEN
+# Constraint 11: Electric vehicles
 for j in range(aantal_diensten):
-    m += xsum(x[i][j] for i in range(aantal_voertuigen) if voertuig.iloc[i, 7] < dienst.iloc[j, 9] ) == 0
+    if dienst.loc[j, 'elektriciteit'] == 1:
+        m += xsum(x[i][j] for i in range(aantal_voertuigen) if voertuig.loc[i, 'elektriciteit'] == 1) == 1
 
-# OPTIMALISEER HET MODEL
+# Optimize the model
 m.optimize()
 
-# Toon de toegewezen voertuigen aan ritten
+# Assign vehicles to services
+toegewezen_voertuig = [-1] * aantal_diensten
 for j in range(aantal_diensten):
     for i in range(aantal_voertuigen):
         if x[i][j].x >= 0.99:
-            toegewezen_voertuig.append(i + 1)
+            toegewezen_voertuig[j] = voertuig.loc[i, 'nummer']
+            break
 
-planning = dienst
-planning['voertuig'] = toegewezen_voertuig
+# Create the planning DataFrame
+planning = dienst.copy()
+planning['voertuig_nummer'] = toegewezen_voertuig
 
 vehicle_datum_map = dict(zip(voertuig_nummer, voertuig_datum))
 vehicle_stelplaats_map = dict(zip(voertuig_nummer, voertuig_stelplaats))
@@ -210,5 +187,4 @@ planning['bus_rijbereik'] = toegewezen_voertuig_rijbereik
 planning['bus_verbruik'] = toegewezen_voertuig_verbruik
 planning['bus_beschikbaar'] = toegewezen_voertuig_beschikbaar
 
-print(planning)
-planning.to_excel("data/PLANNING.xlsx", index=False)
+planning.to_excel("data/PLANNING_02.xlsx", index=False)
