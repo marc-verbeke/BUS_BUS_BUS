@@ -2,7 +2,7 @@ import pandas as pd
 from datetime import datetime
 from mip import Model, xsum, minimize, BINARY
 
-# Load the data
+# Load the data BLABLABLA
 dienst = pd.read_excel("data/DIENSTEN.xlsx")
 voertuig = pd.read_excel("data/voertuigen.xlsx")
 
